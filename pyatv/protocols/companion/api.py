@@ -91,6 +91,7 @@ class CompanionAPI(
         self._connection: Optional[CompanionConnection] = None
         self._protocol: Optional[CompanionProtocol] = None
         self.sid: int = 0
+        _LOGGER.__init__('CompanionDebugger')
 
     async def disconnect(self):
         """Disconnect from companion device."""

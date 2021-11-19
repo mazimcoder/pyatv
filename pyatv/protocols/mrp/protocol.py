@@ -203,6 +203,23 @@ class MrpProtocol(MessageDispatcher[int, protobuf.ProtocolMessage]):
 
         self.connection.send(message)
 
+    async def send_and_receive_custom(self, message, generate_identifier=True, timeout=5):
+        """Send a message and wait for a response."""
+        if self._state not in [
+            ProtocolState.CONNECTED,
+            ProtocolState.READY,
+        ]:
+            raise exceptions.InvalidStateError(self._state.name)
+
+        if generate_identifier:
+            identifier = str(uuid.uuid4()).upper()
+            message.identifier = identifier
+        else:
+            identifier = "type_" + str(123)
+
+        self.connection.send(message)
+        return await self._receive(identifier, timeout)
+
     async def send_and_receive(self, message, generate_identifier=True, timeout=5):
         """Send a message and wait for a response."""
         if self._state not in [

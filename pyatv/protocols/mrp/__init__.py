@@ -2,12 +2,15 @@
 
 import asyncio
 import datetime
+import encodings.utf_8
 import logging
 import math
 import re
+import threading
 from typing import Any, Dict, Generator, List, Mapping, Optional, Set, Tuple
 
 from pyatv import exceptions
+from pyatv.CompanionApi import atvMeta, atvConfigAir
 from pyatv.auth.hap_srp import SRPAuthHandler
 from pyatv.const import (
     DeviceState,
@@ -45,9 +48,10 @@ from pyatv.protocols.mrp import messages, protobuf
 from pyatv.protocols.mrp.connection import AbstractMrpConnection, MrpConnection
 from pyatv.protocols.mrp.pairing import MrpPairingHandler
 from pyatv.protocols.mrp.player_state import PlayerState, PlayerStateManager
-from pyatv.protocols.mrp.protobuf import CommandInfo_pb2
+from pyatv.protocols.mrp.protobuf import CommandInfo_pb2, ProtocolMessage_pb2, GetRemoteTextInputSessionMessage
 from pyatv.protocols.mrp.protobuf import ContentItemMetadata as cim
 from pyatv.protocols.mrp.protobuf import PlaybackState
+from pyatv.protocols.mrp.protobuf.ProtocolMessage_pb2 import ProtocolMessage
 from pyatv.protocols.mrp.protocol import MrpProtocol
 from pyatv.support.cache import Cache
 from pyatv.support.device_info import lookup_model, lookup_version
@@ -76,7 +80,6 @@ _KEY_LOOKUP = {
     "volume_down": (12, 0xEA),
     # 'mic': (12, 0x04),  # Siri
 }  # Dict[str, Tuple[int, int]]
-
 
 _FEATURES_SUPPORTED: List[FeatureName] = [
     FeatureName.Down,
@@ -133,7 +136,7 @@ def _cocoa_to_timestamp(time):
 
 
 def build_playing_instance(  # pylint: disable=too-many-locals
-    state: PlayerState,
+        state: PlayerState,
 ) -> Playing:
     """Build a Playing instance from play state."""
 
@@ -192,7 +195,7 @@ def build_playing_instance(  # pylint: disable=too-many-locals
 
         elapsed_time: int = state.metadata_field("elapsedTime") or 0
         diff = (
-            datetime.datetime.now() - _cocoa_to_timestamp(elapsed_timestamp)
+                datetime.datetime.now() - _cocoa_to_timestamp(elapsed_timestamp)
         ).total_seconds()
 
         if device_state() == DeviceState.Playing:
@@ -287,20 +290,356 @@ async def _send_hid_key(protocol: MrpProtocol, key: str, action: InputAction) ->
         raise exceptions.NotSupportedError(f"unsupported input action: {action}")
 
 
+async def _send_text(protocol: protocol, text: str, devid: str) -> None:
+    try:
+        m = messages.create(message_type=protobuf.KeyboardState.TextDidChange)
+        # textInputMessage
+        r = await protocol.send(message=m)
+        # res = await protocol.message_received(m,_)
+
+        msg = messages.get_keyboard_session()
+        await protocol.send(msg)
+        msg = messages
+    except Exception as ex:
+        print(f'Error _send_text {ex}')
+        raise ex
+
+
+def _send_keyboard(protocol: MrpProtocol, key: str, action: InputAction, fn: int, devid: str) -> []:
+    try:
+        ev = threading.Event()
+
+        async def task_do_press(keycode: [int], hold: bool):
+            try:
+                if keycode[0] == 1:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
+                elif hold:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
+                    ev.wait(1)
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
+                else:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
+
+
+                ev.set()
+            except Exception as ex:
+                print(f'Error task_do_press {ex}')
+
+        def thread_do_press(keycode: [int], hold: bool):
+
+            loop = asyncio.new_event_loop()
+            future = loop.create_task(coro=task_do_press(keycode=keycode, hold=hold))
+            ev.wait(5)
+            ev.clear()
+            loop.run_until_complete(future)
+            loop.close()
+
+        keycode = [7, 0x00]
+        if fn != 0:
+            keycode = [int(key) if key.__eq__('') is False and key.__eq__('0') is False else 7, fn]
+        else:
+            ch = ord(key)
+            if key.isalpha():  # 0x04    >>>     0x1D
+                if key.isupper() is False:
+                    keycode = [7, ch - 93]
+                else:
+                    k = ord(key.lower())
+                    keycode = [7, k - 93]
+            elif key.isnumeric():  # 0x59    >>>     0x62
+                if key.__eq__('0'):
+                    keycode = [7, ch + 50]
+                else:
+                    keycode = [7, ch + 40]
+            else:
+                keycode = [7, ch - 44]
+            # else:
+            #     raise exceptions.NotSupportedError(f"Error _send_keyboard unsupported key: {key}")
+
+        #   0x2D    -
+        #   0x2E    =
+        #   0x2F    [
+        #   0x30    ]
+        #   0x31    \
+        #   0x32    \
+        #   0x33    ;
+        #   0x34    '
+        #   0x35    `
+        #   0x36    ,
+        #   0x37    .
+        #   0x38    /
+        # spacebar  0x2C
+        # backspace 0x2A
+
+        _hold = False
+        xth = 1
+        if action == InputAction.SingleTap:
+            _hold = False
+            xth = 1
+        elif action == InputAction.DoubleTap:
+            _hold = False
+            xth = 2
+        elif action == InputAction.Hold:
+            _hold = True
+            xth = 1
+        else:
+            raise exceptions.NotSupportedError(f"unsupported input action: {action}")
+        ev.set()
+        while xth > 0:
+            press_th = threading.Thread(target=thread_do_press, args=(keycode, _hold))
+            press_th.start()
+            xth -= 1
+
+        msgs = [messages.send_hid_event(keycode[0], keycode[1], False),
+                messages.send_hid_event(keycode[0], keycode[1], True)]
+        return msgs
+    except Exception as ex:
+        print(f'Error _send_keyboard {ex}')
+        raise ex
+
+
 # pylint: disable=too-many-public-methods
 class MrpRemoteControl(RemoteControl):
     """Implementation of API for controlling an Apple TV."""
 
     def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        psm: PlayerStateManager,
-        protocol: MrpProtocol,
+            self,
+            loop: asyncio.AbstractEventLoop,
+            psm: PlayerStateManager,
+            protocol: MrpProtocol,
     ) -> None:
         """Initialize a new MrpRemoteControl."""
         self.loop = loop
         self.psm = psm
         self.protocol = protocol
+        self._add_listeners()
+        ##### Listner here Mustafa
+
+    def _add_listeners(self):
+        try:
+            msgs = [
+                protobuf.ProtocolMessage.AUDIO_FADE_MESSAGE,
+                protobuf.ProtocolMessage.AUDIO_FADE_RESPONSE_MESSAGE,
+                protobuf.ProtocolMessage.CLIENT_UPDATES_CONFIG_MESSAGE,
+                protobuf.ProtocolMessage.CRYPTO_PAIRING_MESSAGE,
+                protobuf.ProtocolMessage.DEVICE_INFO_MESSAGE,
+                protobuf.ProtocolMessage.DEVICE_INFO_UPDATE_MESSAGE,
+                protobuf.ProtocolMessage.GENERIC_MESSAGE,
+                protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE,
+                protobuf.ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE,
+                protobuf.ProtocolMessage.GET_VOLUME_MESSAGE,
+                protobuf.ProtocolMessage.GET_VOLUME_RESULT_MESSAGE,
+                protobuf.ProtocolMessage.KEYBOARD_MESSAGE,
+                protobuf.ProtocolMessage.NOTIFICATION_MESSAGE,
+                protobuf.ProtocolMessage.ORIGIN_CLIENT_PROPERTIES_MESSAGE,
+                protobuf.ProtocolMessage.PLAYBACK_QUEUE_REQUEST_MESSAGE,
+                protobuf.ProtocolMessage.PLAYER_CLIENT_PROPERTIES_MESSAGE,
+                protobuf.ProtocolMessage.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE,
+                protobuf.ProtocolMessage.REGISTER_HID_DEVICE_MESSAGE,
+                protobuf.ProtocolMessage.REGISTER_HID_DEVICE_RESULT_MESSAGE,
+                protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_MESSAGE,
+                protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_RESPONSE_MESSAGE,
+                protobuf.ProtocolMessage.REMOTE_TEXT_INPUT_MESSAGE,
+                protobuf.ProtocolMessage.REMOVE_CLIENT_MESSAGE,
+                protobuf.ProtocolMessage.REMOVE_ENDPOINTS_MESSAGE,
+                protobuf.ProtocolMessage.REMOVE_OUTPUT_DEVICES_MESSAGE,
+                protobuf.ProtocolMessage.REMOVE_PLAYER_MESSAGE,
+                protobuf.ProtocolMessage.SEND_COMMAND_MESSAGE,
+                protobuf.ProtocolMessage.SEND_COMMAND_RESULT_MESSAGE,
+                protobuf.ProtocolMessage.SEND_HID_EVENT_MESSAGE,
+                protobuf.ProtocolMessage.SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE,
+                protobuf.ProtocolMessage.SEND_VOICE_INPUT_MESSAGE,
+                protobuf.ProtocolMessage.SET_ARTWORK_MESSAGE,
+                protobuf.ProtocolMessage.SET_CONNECTION_STATE_MESSAGE,
+                protobuf.ProtocolMessage.SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE,
+                protobuf.ProtocolMessage.SET_DISCOVERY_MODE_MESSAGE,
+                protobuf.ProtocolMessage.SET_HILITE_MODE_MESSAGE,
+                protobuf.ProtocolMessage.SET_NOW_PLAYING_CLIENT_MESSAGE,
+                protobuf.ProtocolMessage.SET_NOW_PLAYING_PLAYER_MESSAGE,
+                protobuf.ProtocolMessage.SET_RECORDING_STATE_MESSAGE,
+                protobuf.ProtocolMessage.SET_STATE_MESSAGE,
+                protobuf.ProtocolMessage.SET_VOLUME_MESSAGE,
+                protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE,
+                protobuf.ProtocolMessage.TRANSACTION_MESSAGE,
+                protobuf.ProtocolMessage.UPDATE_CLIENT_MESSAGE,
+                protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_ARTWORK_MESSAGE,
+                protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_MESSAGE,
+                protobuf.ProtocolMessage.UPDATE_END_POINTS_MESSAGE,
+                protobuf.ProtocolMessage.UPDATE_OUTPUT_DEVICE_MESSAGE,
+                protobuf.ProtocolMessage.VOLUME_CONTROL_AVAILABILITY_MESSAGE,
+                protobuf.ProtocolMessage.VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE,
+                protobuf.ProtocolMessage.VOLUME_DID_CHANGE_MESSAGE,
+                protobuf.ProtocolMessage.WAKE_DEVICE_MESSAGE,
+
+            ]
+            # for m in msgs:
+            #     self.protocol.listen_to()   #old.add_listener(
+            #         self.Keyboard_changed,
+            #         m,
+            #     )
+            # protobuf.DEVICE_INFO_UPDATE_MESSAGE
+
+            for m in msgs:
+                self.protocol.listen_to(m, self._update_keyboard_state)
+        except Exception as ex:
+            print(f'Error _add_listner {ex}')
+
+    async def _update_keyboard_state(self, message):
+        try:
+            msg = message
+            # _msg = msg.inner()
+            # print(msg)
+        except Exception as ex:
+            print(f'Error _update_keyboard_state {ex}')
+
+    def keyboad_pull(self, keyboard: str, action: InputAction, fn: int, devid: str):
+        try:
+            msgs = [
+                protobuf.AUDIO_FADE_MESSAGE,
+                protobuf.AUDIO_FADE_RESPONSE_MESSAGE,
+                protobuf.CLIENT_UPDATES_CONFIG_MESSAGE,
+                protobuf.CRYPTO_PAIRING_MESSAGE,
+                protobuf.DEVICE_INFO_MESSAGE,
+                protobuf.DEVICE_INFO_UPDATE_MESSAGE,
+                protobuf.GENERIC_MESSAGE,
+                protobuf.GET_KEYBOARD_SESSION_MESSAGE,
+                protobuf.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE,
+                protobuf.GET_VOLUME_MESSAGE,
+                protobuf.GET_VOLUME_RESULT_MESSAGE,
+                protobuf.KEYBOARD_MESSAGE,
+                protobuf.NOTIFICATION_MESSAGE,
+                protobuf.ORIGIN_CLIENT_PROPERTIES_MESSAGE,
+                protobuf.PLAYBACK_QUEUE_REQUEST_MESSAGE,
+                protobuf.PLAYER_CLIENT_PROPERTIES_MESSAGE,
+                protobuf.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE,
+                protobuf.REGISTER_HID_DEVICE_MESSAGE,
+                protobuf.REGISTER_HID_DEVICE_RESULT_MESSAGE,
+                protobuf.REGISTER_VOICE_INPUT_DEVICE_MESSAGE,
+                protobuf.REGISTER_VOICE_INPUT_DEVICE_RESPONSE_MESSAGE,
+                protobuf.REMOTE_TEXT_INPUT_MESSAGE,
+                protobuf.REMOVE_CLIENT_MESSAGE,
+                protobuf.REMOVE_ENDPOINTS_MESSAGE,
+                protobuf.REMOVE_OUTPUT_DEVICES_MESSAGE,
+                protobuf.REMOVE_PLAYER_MESSAGE,
+                protobuf.SEND_COMMAND_MESSAGE,
+                protobuf.SEND_COMMAND_RESULT_MESSAGE,
+                protobuf.SEND_HID_EVENT_MESSAGE,
+                protobuf.SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE,
+                protobuf.SEND_VOICE_INPUT_MESSAGE,
+                protobuf.SET_ARTWORK_MESSAGE,
+                protobuf.SET_CONNECTION_STATE_MESSAGE,
+                protobuf.SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE,
+                protobuf.SET_DISCOVERY_MODE_MESSAGE,
+                protobuf.SET_HILITE_MODE_MESSAGE,
+                protobuf.SET_NOW_PLAYING_CLIENT_MESSAGE,
+                protobuf.SET_NOW_PLAYING_PLAYER_MESSAGE,
+                protobuf.SET_RECORDING_STATE_MESSAGE,
+                protobuf.SET_STATE_MESSAGE,
+                protobuf.SET_VOLUME_MESSAGE,
+                protobuf.TEXT_INPUT_MESSAGE,
+                protobuf.TRANSACTION_MESSAGE,
+                protobuf.UPDATE_CLIENT_MESSAGE,
+                protobuf.UPDATE_CONTENT_ITEM_ARTWORK_MESSAGE,
+                protobuf.UPDATE_CONTENT_ITEM_MESSAGE,
+                protobuf.UPDATE_END_POINTS_MESSAGE,
+                protobuf.UPDATE_OUTPUT_DEVICE_MESSAGE,
+                protobuf.VOLUME_CONTROL_AVAILABILITY_MESSAGE,
+                protobuf.VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE,
+                protobuf.VOLUME_DID_CHANGE_MESSAGE,
+                protobuf.WAKE_DEVICE_MESSAGE,
+
+            ]
+            async def _pull(_=None):
+                try:
+                    while True:
+                        # res0 = await self.protocol.send_and_receive(
+                        #     message=messages.create(protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE),
+                        #     generate_identifier=False,
+                        #     timeout=5)  # Mustafa
+                        await asyncio.sleep(delay=.3, loop=asyncio.get_event_loop())
+
+                        # for m in msgs:
+
+                        # get_key_in = messages.create(protobuf.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE)
+                        # get_key_in.data = bytes("123DDD", encoding="UTF-8")
+                        # await self.protocol.send(get_key_in)
+                        # self.protocol.message_received(get_key_in,_)
+                        k = keyboard.replace('get_session', '')
+                        # _m = messages.create(protobuf.GET_KEYBOARD_SESSION_MESSAGE)
+                        # __m = _m.inner()
+
+                        # msg = messages.create(protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE)
+                        #
+                        # res0 = await self.protocol.send_and_receive(msg)
+                        # print(f'======\n{res0}\n=====')
+                        res = _send_keyboard(protocol=self.protocol, key=k, action=action, fn=fn, devid=devid)
+
+                        for m in res:
+                            self.protocol.message_received(m, _)
+                        # await self.protocol.send(get_key)
+                        # await self.protocol.send(get_key_in)
+                        # msg = messages.create(protobuf.TEXT_INPUT_MESSAGE)
+                        # _msg = msg.inner()
+                        # _msg.text = "Hi123"
+                        # await self.protocol.send(_msg)
+                        # res = await self.protocol.send_and_receive_custom(message=_msg
+                        #                                            , generate_identifier=False,
+                        #                                            timeout=5
+                        #                                            )
+                        # await self.protocol.send(msg)
+
+                        # await self._send_command(CommandInfo_pb2.Play)
+
+                        # res0 = self.protocol.message_received(msg, _)
+
+                        # res = await self._send_command(ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE) #CommandInfo_pb2
+
+                        # print(
+                        #     f'==========={res}========================================================')
+
+                        # await self.protocol.send(messages.get_keyboardtext_session())  # Mustafa
+                        # await self.protocol.send(messages.get_keyboardtext1_session())  # Mustafa
+                        # await self.protocol.send(messages.create(protobuf.ProtocolMessage.KEYBOARD_MESSAGE))  # Mustafa
+                        # res = await self.protocol.send_and_receive(
+                        #     message=messages.create(protobuf.REGISTER_HID_DEVICE_MESSAGE),
+                        #     generate_identifier=True,
+                        #     timeout=5)  # mustafa
+                        # print(
+                        #     f'===========get_hid_state====================\n{res}\n======================================')
+                except Exception as ex:
+                    print(f'Error keyboad_pull {ex}')
+
+            loop = asyncio.new_event_loop()
+            future = loop.create_task(coro=_pull())
+            loop.run_until_complete(future)
+        except Exception as ex:
+            print(f'Error keyboad_pull {ex}')
+
+    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid: str, _=None) -> None:
+        """" Mustafa custom cmd test"""
+        try:
+
+            if keyboard.__contains__('get_session'):
+                th = threading.Thread(target=self.keyboad_pull, args=(keyboard, action, fn, devid))
+                th.start()
+                # res0 = await self.protocol.send_and_receive(messages.get_text_session())  # Mustafa
+                # await self.protocol.send(messages.get_keyboardtext_session())  # Mustafa
+                # await self.protocol.send(messages.get_keyboardtext1_session())  # Mustafa
+                # await self.protocol.send(messages.get_keyboard_state())  # Mustafa
+                # res = await self.protocol.send_and_receive(messages.get_hid_state())  # mustafa
+
+            elif len(keyboard) > 1:
+                await _send_text(protocol=self.protocol, text=keyboard, devid=devid)
+            else:
+                res = _send_keyboard(protocol=self.protocol, key=keyboard, action=action, fn=fn, devid=devid)
+                for m in res:
+                    self.protocol.message_received(m, _)
+
+
+                print(f'Keyboard char={keyboard} , action={action}, {res}')
+        except Exception as ex:
+            print(f'Error set_custom {ex}')
+            raise ex
 
     async def _send_command(self, command, **kwargs):
         resp = await self.protocol.send_and_receive(messages.command(command, **kwargs))
@@ -455,7 +794,7 @@ class MrpMetadata(Metadata):
         return self.identifier
 
     async def artwork(
-        self, width: Optional[int] = 512, height: Optional[int] = None
+            self, width: Optional[int] = 512, height: Optional[int] = None
     ) -> Optional[ArtworkInfo]:
         """Return artwork for what is currently playing (or None).
 
@@ -529,10 +868,10 @@ class MrpPower(Power):
     """Implementation of API for retrieving a power state from an Apple TV."""
 
     def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        protocol: MrpProtocol,
-        remote: MrpRemoteControl,
+            self,
+            loop: asyncio.AbstractEventLoop,
+            protocol: MrpProtocol,
+            remote: MrpRemoteControl,
     ) -> None:
         """Initialize a new MrpPower instance."""
         super().__init__()
@@ -678,7 +1017,7 @@ class MrpAudio(Audio):
         self._update_volume_controls(inner.capabilities)
 
     def _update_volume_controls(
-        self, availabilty_message: protobuf.VolumeControlAvailabilityMessage
+            self, availabilty_message: protobuf.VolumeControlAvailabilityMessage
     ) -> None:
         self._volume_controls_available = availabilty_message.volumeControlAvailable
         _LOGGER.debug(
@@ -743,7 +1082,7 @@ class MrpFeatures(Features):
         self.audio = audio
 
     def get_feature(  # pylint: disable=too-many-return-statements,too-many-branches
-        self, feature_name: FeatureName
+            self, feature_name: FeatureName
     ) -> FeatureInfo:
         """Return current state of a feature."""
         if feature_name in _FEATURES_SUPPORTED:
@@ -768,11 +1107,11 @@ class MrpFeatures(Features):
         if feature_name == FeatureName.PlayPause:
             playback_state = self.psm.playing.playback_state
             if playback_state == PlaybackState.Playing and self.in_state(
-                FeatureState.Available, FeatureName.Pause
+                    FeatureState.Available, FeatureName.Pause
             ):
                 return FeatureInfo(state=FeatureState.Available)
             if playback_state == PlaybackState.Paused and self.in_state(
-                FeatureState.Available, FeatureName.Play
+                    FeatureState.Available, FeatureName.Play
             ):
                 return FeatureInfo(state=FeatureState.Available)
 
@@ -802,7 +1141,7 @@ class MrpFeatures(Features):
 
 
 def mrp_service_handler(
-    mdns_service: mdns.Service, response: mdns.Response
+        mdns_service: mdns.Service, response: mdns.Response
 ) -> Optional[ScanHandlerReturn]:
     """Parse and return a new MRP service."""
     # Ignore this service if tvOS version is >= 15 as it doesn't work anymore
@@ -852,9 +1191,9 @@ def device_info(service_type: str, properties: Mapping[str, Any]) -> Dict[str, A
 
 
 async def service_info(
-    service: MutableService,
-    devinfo: DeviceInfo,
-    services: Mapping[Protocol, BaseService],
+        service: MutableService,
+        devinfo: DeviceInfo,
+        services: Mapping[Protocol, BaseService],
 ) -> None:
     """Update service with additional information.
 
@@ -869,14 +1208,14 @@ async def service_info(
 
 
 def create_with_connection(  # pylint: disable=too-many-locals
-    loop: asyncio.AbstractEventLoop,
-    config: BaseConfig,
-    service: BaseService,
-    device_listener: StateProducer,
-    session_manager: ClientSessionManager,
-    takeover: TakeoverMethod,
-    connection: AbstractMrpConnection,
-    requires_heatbeat: bool = True,
+        loop: asyncio.AbstractEventLoop,
+        config: BaseConfig,
+        service: BaseService,
+        device_listener: StateProducer,
+        session_manager: ClientSessionManager,
+        takeover: TakeoverMethod,
+        connection: AbstractMrpConnection,
+        requires_heatbeat: bool = True,
 ) -> SetupData:
     """Set up a new MRP service from a connection."""
     protocol = MrpProtocol(connection, SRPAuthHandler(), service)
@@ -940,12 +1279,12 @@ def create_with_connection(  # pylint: disable=too-many-locals
 
 
 def setup(
-    loop: asyncio.AbstractEventLoop,
-    config: BaseConfig,
-    service: BaseService,
-    device_listener: StateProducer,
-    session_manager: ClientSessionManager,
-    takeover: TakeoverMethod,
+        loop: asyncio.AbstractEventLoop,
+        config: BaseConfig,
+        service: BaseService,
+        device_listener: StateProducer,
+        session_manager: ClientSessionManager,
+        takeover: TakeoverMethod,
 ) -> Generator[SetupData, None, None]:
     """Set up a new MRP service."""
     yield create_with_connection(
@@ -960,11 +1299,11 @@ def setup(
 
 
 def pair(
-    config: BaseConfig,
-    service: BaseService,
-    session_manager: ClientSessionManager,
-    loop: asyncio.AbstractEventLoop,
-    **kwargs
+        config: BaseConfig,
+        service: BaseService,
+        session_manager: ClientSessionManager,
+        loop: asyncio.AbstractEventLoop,
+        **kwargs
 ) -> PairingHandler:
     """Return pairing handler for protocol."""
     return MrpPairingHandler(config, service, session_manager, loop, **kwargs)

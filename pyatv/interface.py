@@ -247,6 +247,11 @@ class PairingHandler(ABC):
 class RemoteControl:
     """Base class for API used to control an Apple TV."""
 
+    @feature(51, "set_custom", "Custom cmds")
+    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid:str) -> None:
+        """Custom cmd"""
+        raise exceptions.NotSupportedError()
+
     # pylint: disable=invalid-name
     @feature(0, "Up", "Up button on remote.")
     async def up(self, action: InputAction = InputAction.SingleTap) -> None:
