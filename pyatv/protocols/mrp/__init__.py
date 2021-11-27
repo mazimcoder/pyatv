@@ -1,14 +1,16 @@
 """Implementation of the MediaRemoteTV Protocol used by ATV4 and later."""
 
 import asyncio
+import crypt
 import datetime
 import encodings.utf_8
 import logging
 import math
 import re
 import threading
+import time
 from typing import Any, Dict, Generator, List, Mapping, Optional, Set, Tuple
-
+import uuid
 from pyatv import exceptions
 from pyatv.CompanionApi import atvMeta, atvConfigAir
 from pyatv.auth.hap_srp import SRPAuthHandler
@@ -290,54 +292,59 @@ async def _send_hid_key(protocol: MrpProtocol, key: str, action: InputAction) ->
         raise exceptions.NotSupportedError(f"unsupported input action: {action}")
 
 
-async def _send_text(protocol: protocol, text: str, devid: str) -> None:
+def _send_text(protocol: protocol, text: str, devid: str) -> []:
     try:
-        m = messages.create(message_type=protobuf.KeyboardState.TextDidChange)
-        # textInputMessage
-        r = await protocol.send(message=m)
-        # res = await protocol.message_received(m,_)
-
-        msg = messages.get_keyboard_session()
-        await protocol.send(msg)
-        msg = messages
+        k = []
+        cnt = 0
+        l = len(text)
+        ev.set()
+        for t in text:
+            k.append(_send_keyboard(protocol=protocol, key=t, devid=devid, action=InputAction.SingleTap, fn=0x00))
+            cnt += 1
+        return k
     except Exception as ex:
         print(f'Error _send_text {ex}')
         raise ex
 
 
+ev = threading.Event()
+
+
 def _send_keyboard(protocol: MrpProtocol, key: str, action: InputAction, fn: int, devid: str) -> []:
     try:
-        ev = threading.Event()
 
-        async def task_do_press(keycode: [int], hold: bool):
+        async def task_do_press(keycode: [int], action: InputAction):
             try:
                 if keycode[0] == 1:
                     await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
-                elif hold:
-                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
-                    ev.wait(1)
-                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
-                else:
-                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
-                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
 
-
+                elif action == InputAction.Hold:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
+                elif action == InputAction.Release:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
+                elif action == InputAction.SingleTap or action == InputAction.DoubleTap:
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], True))
+                    await protocol.send(messages.send_hid_event(keycode[0], keycode[1], False))
+                    print(f'send >>>>{keycode}')
+                time.sleep(1)
                 ev.set()
             except Exception as ex:
                 print(f'Error task_do_press {ex}')
+                ev.set()
 
-        def thread_do_press(keycode: [int], hold: bool):
-
+        def thread_do_press(keycode: [int], action: InputAction):
             loop = asyncio.new_event_loop()
-            future = loop.create_task(coro=task_do_press(keycode=keycode, hold=hold))
             ev.wait(5)
-            ev.clear()
+            print(f'tasking >>>>{keycode}')
+            future = loop.create_task(coro=task_do_press(keycode=keycode, action=action))
             loop.run_until_complete(future)
+
+            ev.clear()
             loop.close()
 
         keycode = [7, 0x00]
         if fn != 0:
-            keycode = [int(key) if key.__eq__('') is False and key.__eq__('0') is False else 7, fn]
+            keycode = [int(key, base=16), fn]
         else:
             ch = ord(key)
             if key.isalpha():  # 0x04    >>>     0x1D
@@ -351,10 +358,10 @@ def _send_keyboard(protocol: MrpProtocol, key: str, action: InputAction, fn: int
                     keycode = [7, ch + 50]
                 else:
                     keycode = [7, ch + 40]
+            elif key.__eq__(' '):
+                keycode = [7, 0x2C]
             else:
                 keycode = [7, ch - 44]
-            # else:
-            #     raise exceptions.NotSupportedError(f"Error _send_keyboard unsupported key: {key}")
 
         #   0x2D    -
         #   0x2E    =
@@ -370,29 +377,18 @@ def _send_keyboard(protocol: MrpProtocol, key: str, action: InputAction, fn: int
         #   0x38    /
         # spacebar  0x2C
         # backspace 0x2A
+        #   clear   0x9C
 
         _hold = False
         xth = 1
-        if action == InputAction.SingleTap:
-            _hold = False
-            xth = 1
-        elif action == InputAction.DoubleTap:
+        if action == InputAction.DoubleTap:
             _hold = False
             xth = 2
-        elif action == InputAction.Hold:
-            _hold = True
-            xth = 1
-        else:
-            raise exceptions.NotSupportedError(f"unsupported input action: {action}")
-        ev.set()
         while xth > 0:
-            press_th = threading.Thread(target=thread_do_press, args=(keycode, _hold))
+            press_th = threading.Thread(target=thread_do_press, args=(keycode, action))
             press_th.start()
             xth -= 1
-
-        msgs = [messages.send_hid_event(keycode[0], keycode[1], False),
-                messages.send_hid_event(keycode[0], keycode[1], True)]
-        return msgs
+        return keycode
     except Exception as ex:
         print(f'Error _send_keyboard {ex}')
         raise ex
@@ -418,58 +414,61 @@ class MrpRemoteControl(RemoteControl):
     def _add_listeners(self):
         try:
             msgs = [
-                protobuf.ProtocolMessage.AUDIO_FADE_MESSAGE,
-                protobuf.ProtocolMessage.AUDIO_FADE_RESPONSE_MESSAGE,
-                protobuf.ProtocolMessage.CLIENT_UPDATES_CONFIG_MESSAGE,
-                protobuf.ProtocolMessage.CRYPTO_PAIRING_MESSAGE,
-                protobuf.ProtocolMessage.DEVICE_INFO_MESSAGE,
-                protobuf.ProtocolMessage.DEVICE_INFO_UPDATE_MESSAGE,
-                protobuf.ProtocolMessage.GENERIC_MESSAGE,
-                protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE,
-                protobuf.ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE,
-                protobuf.ProtocolMessage.GET_VOLUME_MESSAGE,
-                protobuf.ProtocolMessage.GET_VOLUME_RESULT_MESSAGE,
+                # protobuf.ProtocolMessage.AUDIO_FADE_MESSAGE,
+                # protobuf.ProtocolMessage.AUDIO_FADE_RESPONSE_MESSAGE,
+                # protobuf.ProtocolMessage.CLIENT_UPDATES_CONFIG_MESSAGE,
+                # protobuf.ProtocolMessage.CRYPTO_PAIRING_MESSAGE,
+                # protobuf.ProtocolMessage.DEVICE_INFO_MESSAGE,
+                # protobuf.ProtocolMessage.DEVICE_INFO_UPDATE_MESSAGE,
+                # protobuf.ProtocolMessage.GENERIC_MESSAGE,
+                # protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE,
                 protobuf.ProtocolMessage.KEYBOARD_MESSAGE,
-                protobuf.ProtocolMessage.NOTIFICATION_MESSAGE,
-                protobuf.ProtocolMessage.ORIGIN_CLIENT_PROPERTIES_MESSAGE,
-                protobuf.ProtocolMessage.PLAYBACK_QUEUE_REQUEST_MESSAGE,
-                protobuf.ProtocolMessage.PLAYER_CLIENT_PROPERTIES_MESSAGE,
-                protobuf.ProtocolMessage.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE,
+                # protobuf.ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE,
+                # protobuf.ProtocolMessage.GET_VOLUME_MESSAGE,
+                # protobuf.ProtocolMessage.GET_VOLUME_RESULT_MESSAGE,
+                # protobuf.ProtocolMessage.KEYBOARD_MESSAGE,
+                # protobuf.ProtocolMessage.NOTIFICATION_MESSAGE,
+                # protobuf.ProtocolMessage.ORIGIN_CLIENT_PROPERTIES_MESSAGE,
+                # protobuf.ProtocolMessage.PLAYBACK_QUEUE_REQUEST_MESSAGE,
+                # protobuf.ProtocolMessage.PLAYER_CLIENT_PROPERTIES_MESSAGE,
+                # protobuf.ProtocolMessage.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE,
                 protobuf.ProtocolMessage.REGISTER_HID_DEVICE_MESSAGE,
                 protobuf.ProtocolMessage.REGISTER_HID_DEVICE_RESULT_MESSAGE,
-                protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_MESSAGE,
-                protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_RESPONSE_MESSAGE,
-                protobuf.ProtocolMessage.REMOTE_TEXT_INPUT_MESSAGE,
-                protobuf.ProtocolMessage.REMOVE_CLIENT_MESSAGE,
-                protobuf.ProtocolMessage.REMOVE_ENDPOINTS_MESSAGE,
-                protobuf.ProtocolMessage.REMOVE_OUTPUT_DEVICES_MESSAGE,
-                protobuf.ProtocolMessage.REMOVE_PLAYER_MESSAGE,
-                protobuf.ProtocolMessage.SEND_COMMAND_MESSAGE,
-                protobuf.ProtocolMessage.SEND_COMMAND_RESULT_MESSAGE,
+                # protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_MESSAGE,
+                # protobuf.ProtocolMessage.REGISTER_VOICE_INPUT_DEVICE_RESPONSE_MESSAGE,
+                # protobuf.ProtocolMessage.REMOTE_TEXT_INPUT_MESSAGE,
+                # protobuf.ProtocolMessage.REMOVE_CLIENT_MESSAGE,
+                # protobuf.ProtocolMessage.REMOVE_ENDPOINTS_MESSAGE,
+                # protobuf.ProtocolMessage.REMOVE_OUTPUT_DEVICES_MESSAGE,
+                # protobuf.ProtocolMessage.REMOVE_PLAYER_MESSAGE,
+                # protobuf.ProtocolMessage.SEND_COMMAND_MESSAGE,
+                # protobuf.ProtocolMessage.SEND_COMMAND_RESULT_MESSAGE,
                 protobuf.ProtocolMessage.SEND_HID_EVENT_MESSAGE,
-                protobuf.ProtocolMessage.SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE,
-                protobuf.ProtocolMessage.SEND_VOICE_INPUT_MESSAGE,
-                protobuf.ProtocolMessage.SET_ARTWORK_MESSAGE,
-                protobuf.ProtocolMessage.SET_CONNECTION_STATE_MESSAGE,
-                protobuf.ProtocolMessage.SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE,
-                protobuf.ProtocolMessage.SET_DISCOVERY_MODE_MESSAGE,
-                protobuf.ProtocolMessage.SET_HILITE_MODE_MESSAGE,
-                protobuf.ProtocolMessage.SET_NOW_PLAYING_CLIENT_MESSAGE,
-                protobuf.ProtocolMessage.SET_NOW_PLAYING_PLAYER_MESSAGE,
-                protobuf.ProtocolMessage.SET_RECORDING_STATE_MESSAGE,
-                protobuf.ProtocolMessage.SET_STATE_MESSAGE,
-                protobuf.ProtocolMessage.SET_VOLUME_MESSAGE,
-                protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE,
-                protobuf.ProtocolMessage.TRANSACTION_MESSAGE,
-                protobuf.ProtocolMessage.UPDATE_CLIENT_MESSAGE,
-                protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_ARTWORK_MESSAGE,
-                protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_MESSAGE,
-                protobuf.ProtocolMessage.UPDATE_END_POINTS_MESSAGE,
-                protobuf.ProtocolMessage.UPDATE_OUTPUT_DEVICE_MESSAGE,
-                protobuf.ProtocolMessage.VOLUME_CONTROL_AVAILABILITY_MESSAGE,
-                protobuf.ProtocolMessage.VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE,
-                protobuf.ProtocolMessage.VOLUME_DID_CHANGE_MESSAGE,
-                protobuf.ProtocolMessage.WAKE_DEVICE_MESSAGE,
+                protobuf.ProtocolMessage.SEND_HID_REPORT_MESSAGE,
+                protobuf.ProtocolMessage.timestamp,
+                # protobuf.ProtocolMessage.SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE,
+                # protobuf.ProtocolMessage.SEND_VOICE_INPUT_MESSAGE,
+                # protobuf.ProtocolMessage.SET_ARTWORK_MESSAGE,
+                # protobuf.ProtocolMessage.SET_CONNECTION_STATE_MESSAGE,
+                # protobuf.ProtocolMessage.SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE,
+                # protobuf.ProtocolMessage.SET_DISCOVERY_MODE_MESSAGE,
+                # protobuf.ProtocolMessage.SET_HILITE_MODE_MESSAGE,
+                # protobuf.ProtocolMessage.SET_NOW_PLAYING_CLIENT_MESSAGE,
+                # protobuf.ProtocolMessage.SET_NOW_PLAYING_PLAYER_MESSAGE,
+                # protobuf.ProtocolMessage.SET_RECORDING_STATE_MESSAGE,
+                # protobuf.ProtocolMessage.SET_STATE_MESSAGE,
+                # protobuf.ProtocolMessage.SET_VOLUME_MESSAGE,
+                # protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE,
+                # protobuf.ProtocolMessage.TRANSACTION_MESSAGE,
+                # protobuf.ProtocolMessage.UPDATE_CLIENT_MESSAGE,
+                # protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_ARTWORK_MESSAGE,
+                # protobuf.ProtocolMessage.UPDATE_CONTENT_ITEM_MESSAGE,
+                # protobuf.ProtocolMessage.UPDATE_END_POINTS_MESSAGE,
+                # protobuf.ProtocolMessage.UPDATE_OUTPUT_DEVICE_MESSAGE,
+                # protobuf.ProtocolMessage.VOLUME_CONTROL_AVAILABILITY_MESSAGE,
+                # protobuf.ProtocolMessage.VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE,
+                # protobuf.ProtocolMessage.VOLUME_DID_CHANGE_MESSAGE,
+                # protobuf.ProtocolMessage.WAKE_DEVICE_MESSAGE,
 
             ]
             # for m in msgs:
@@ -488,67 +487,13 @@ class MrpRemoteControl(RemoteControl):
         try:
             msg = message
             # _msg = msg.inner()
-            # print(msg)
+            print(f'++++++++++ \n{msg}++++++++++\n')
         except Exception as ex:
             print(f'Error _update_keyboard_state {ex}')
 
     def keyboad_pull(self, keyboard: str, action: InputAction, fn: int, devid: str):
         try:
-            msgs = [
-                protobuf.AUDIO_FADE_MESSAGE,
-                protobuf.AUDIO_FADE_RESPONSE_MESSAGE,
-                protobuf.CLIENT_UPDATES_CONFIG_MESSAGE,
-                protobuf.CRYPTO_PAIRING_MESSAGE,
-                protobuf.DEVICE_INFO_MESSAGE,
-                protobuf.DEVICE_INFO_UPDATE_MESSAGE,
-                protobuf.GENERIC_MESSAGE,
-                protobuf.GET_KEYBOARD_SESSION_MESSAGE,
-                protobuf.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE,
-                protobuf.GET_VOLUME_MESSAGE,
-                protobuf.GET_VOLUME_RESULT_MESSAGE,
-                protobuf.KEYBOARD_MESSAGE,
-                protobuf.NOTIFICATION_MESSAGE,
-                protobuf.ORIGIN_CLIENT_PROPERTIES_MESSAGE,
-                protobuf.PLAYBACK_QUEUE_REQUEST_MESSAGE,
-                protobuf.PLAYER_CLIENT_PROPERTIES_MESSAGE,
-                protobuf.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE,
-                protobuf.REGISTER_HID_DEVICE_MESSAGE,
-                protobuf.REGISTER_HID_DEVICE_RESULT_MESSAGE,
-                protobuf.REGISTER_VOICE_INPUT_DEVICE_MESSAGE,
-                protobuf.REGISTER_VOICE_INPUT_DEVICE_RESPONSE_MESSAGE,
-                protobuf.REMOTE_TEXT_INPUT_MESSAGE,
-                protobuf.REMOVE_CLIENT_MESSAGE,
-                protobuf.REMOVE_ENDPOINTS_MESSAGE,
-                protobuf.REMOVE_OUTPUT_DEVICES_MESSAGE,
-                protobuf.REMOVE_PLAYER_MESSAGE,
-                protobuf.SEND_COMMAND_MESSAGE,
-                protobuf.SEND_COMMAND_RESULT_MESSAGE,
-                protobuf.SEND_HID_EVENT_MESSAGE,
-                protobuf.SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE,
-                protobuf.SEND_VOICE_INPUT_MESSAGE,
-                protobuf.SET_ARTWORK_MESSAGE,
-                protobuf.SET_CONNECTION_STATE_MESSAGE,
-                protobuf.SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE,
-                protobuf.SET_DISCOVERY_MODE_MESSAGE,
-                protobuf.SET_HILITE_MODE_MESSAGE,
-                protobuf.SET_NOW_PLAYING_CLIENT_MESSAGE,
-                protobuf.SET_NOW_PLAYING_PLAYER_MESSAGE,
-                protobuf.SET_RECORDING_STATE_MESSAGE,
-                protobuf.SET_STATE_MESSAGE,
-                protobuf.SET_VOLUME_MESSAGE,
-                protobuf.TEXT_INPUT_MESSAGE,
-                protobuf.TRANSACTION_MESSAGE,
-                protobuf.UPDATE_CLIENT_MESSAGE,
-                protobuf.UPDATE_CONTENT_ITEM_ARTWORK_MESSAGE,
-                protobuf.UPDATE_CONTENT_ITEM_MESSAGE,
-                protobuf.UPDATE_END_POINTS_MESSAGE,
-                protobuf.UPDATE_OUTPUT_DEVICE_MESSAGE,
-                protobuf.VOLUME_CONTROL_AVAILABILITY_MESSAGE,
-                protobuf.VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE,
-                protobuf.VOLUME_DID_CHANGE_MESSAGE,
-                protobuf.WAKE_DEVICE_MESSAGE,
 
-            ]
             async def _pull(_=None):
                 try:
                     while True:
@@ -556,15 +501,103 @@ class MrpRemoteControl(RemoteControl):
                         #     message=messages.create(protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE),
                         #     generate_identifier=False,
                         #     timeout=5)  # Mustafa
-                        await asyncio.sleep(delay=.3, loop=asyncio.get_event_loop())
-
+                        # await asyncio.sleep(delay=.3, loop=asyncio.get_event_loop())
+                        #
+                        # for m in msgs:
+                        #     # __m = m.inner()
+                        #     try:
+                        #         _m = messages.create(m)
+                        #         __m = _m.inner()
+                        #         print(f'{__m}')
+                        #         await self.protocol.send(message=_m)
+                        #         msgs[m] = True
+                        #         print(f'{m} :   {msgs[m]}')
+                        #     except Exception as ex:
+                        #         if ex.__eq__('TimeoutError'):
+                        #             msgs[m] = False
+                        #             print(f'{m} :   {msgs[m]}')
+                        #             # self.protocol.message_received(_m, _)
+                        #
+                        # print(f'=======\n{msgs.items()}\n========')
+                        # return
                         # for m in msgs:
 
+                        # await self.protocol.send_and_receive(messages.get_keyboard_session())
+
+                        # identifier = str(uuid.uuid4()).upper()
+
+                        # message = messages.create(protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE, error_code=0,
+                        #                           identifier=identifier)
+                        # m = protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE
+                        # m = message.inner()
+                        # m.encryptedTextCyphertext = bytes('123', encoding="ascii")
+                        # m.text = "123D"
+                        # t = datetime.datetime.utcnow()
+                        # ts = t.timestamp()
+                        # m.timestamp =ts
+                        # m.actionType = 2
+
+                        # res1 = await self.protocol.send(
+                        #     messages.GetRemoteInput_text())
+                        #
+                        # print(res1)
+
+                        # await self.protocol.send_and_receive(messages.get_keyboard_session())
+                        # await asyncio.sleep(delay=1, loop=asyncio.get_event_loop())
+                        # res = await self.protocol.send_and_receive(
+                        #     messages.RemoteInput_text(action=protobuf.ActionType.Set, text='123'))
+                        #
+                        # print(res)
+                        # return
+
+                        # res = await self.protocol.send(messages.Input_text(action=protobuf.ActionType.Set,text='123'))
+                        #
+                        # print(res)
+                        # return
+                        #
+                        # msg = messages.keyboard_text(action=protobuf.ActionType.Set, text='123')
+                        # await self.protocol.send(msg)
+                        # self.protocol.message_received(msg,_)
+                        #
+                        # # await self.protocol.send_and_receive(message=message, generate_identifier=True, timeout=3)
+                        # # self.protocol.message_received(message, _)
+                        # return
+                        #
+                        # message = messages.create(protobuf.ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE)
+                        # m = message.inner()
+                        # # m.HILITEMODE_FIELD_NUMBER = 1
+                        # # m.hiliteMode = 0
+                        #
+                        # await self.protocol.send(message=m)
+                        #
+                        # message = messages.create(protobuf.ProtocolMessage.REMOTE_TEXT_INPUT_MESSAGE)
+                        # m = message.inner()
+                        # # m.data = bytes("123Da", encoding="UTF-8")
+                        # m.attributes.prompt = "123D"
+                        # await self.protocol.send(message=m)
+                        #
+                        # message = messages.create(protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE)
+                        # m = message.inner()
+                        # m.text = "ads123"
+                        #
+                        # await self.protocol.send(message=m)
+
+                        message = messages.create(protobuf.ProtocolMessage.REGISTER_HID_DEVICE_MESSAGE)
+                        m = message.inner()
+
+                        await self.protocol.send(message=m)
+
+                        message = messages.create(protobuf.ProtocolMessage.REGISTER_HID_DEVICE_RESULT_MESSAGE)
+                        m = message.inner()
+
+                        await self.protocol.send(message=m)
+                        res = self.protocol.message_received(message, _)
+                        print(res)
                         # get_key_in = messages.create(protobuf.REGISTER_FOR_GAME_CONTROLLER_EVENTS_MESSAGE)
                         # get_key_in.data = bytes("123DDD", encoding="UTF-8")
                         # await self.protocol.send(get_key_in)
                         # self.protocol.message_received(get_key_in,_)
-                        k = keyboard.replace('get_session', '')
+
                         # _m = messages.create(protobuf.GET_KEYBOARD_SESSION_MESSAGE)
                         # __m = _m.inner()
 
@@ -572,10 +605,15 @@ class MrpRemoteControl(RemoteControl):
                         #
                         # res0 = await self.protocol.send_and_receive(msg)
                         # print(f'======\n{res0}\n=====')
-                        res = _send_keyboard(protocol=self.protocol, key=k, action=action, fn=fn, devid=devid)
 
-                        for m in res:
-                            self.protocol.message_received(m, _)
+                        # self.protocol.message_received(msg, _)
+
+                        # k = keyboard.replace('get_session', '')
+                        # res = _send_keyboard(protocol=self.protocol, key=k, action=action, fn=fn, devid=devid)
+
+                        # for m in res0:
+                        #     self.protocol.message_received(m, _)
+
                         # await self.protocol.send(get_key)
                         # await self.protocol.send(get_key_in)
                         # msg = messages.create(protobuf.TEXT_INPUT_MESSAGE)
@@ -615,28 +653,24 @@ class MrpRemoteControl(RemoteControl):
         except Exception as ex:
             print(f'Error keyboad_pull {ex}')
 
-    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid: str, _=None) -> None:
-        """" Mustafa custom cmd test"""
+    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid: str) -> bool:
+        """" Mustafa custom cmd"""
         try:
-
-            if keyboard.__contains__('get_session'):
+            res = []
+            if keyboard.__contains__('get_keyboard_session_pull'):
                 th = threading.Thread(target=self.keyboad_pull, args=(keyboard, action, fn, devid))
                 th.start()
-                # res0 = await self.protocol.send_and_receive(messages.get_text_session())  # Mustafa
-                # await self.protocol.send(messages.get_keyboardtext_session())  # Mustafa
-                # await self.protocol.send(messages.get_keyboardtext1_session())  # Mustafa
-                # await self.protocol.send(messages.get_keyboard_state())  # Mustafa
-                # res = await self.protocol.send_and_receive(messages.get_hid_state())  # mustafa
-
             elif len(keyboard) > 1:
-                await _send_text(protocol=self.protocol, text=keyboard, devid=devid)
+                res = _send_text(protocol=self.protocol, text=keyboard, devid=devid)
             else:
                 res = _send_keyboard(protocol=self.protocol, key=keyboard, action=action, fn=fn, devid=devid)
-                for m in res:
-                    self.protocol.message_received(m, _)
+                # object.close()
 
-
-                print(f'Keyboard char={keyboard} , action={action}, {res}')
+            print(f'Keyboard data={keyboard} , action={action}, {res}')
+            if len(res) > 0:
+                return True
+            else:
+                return False
         except Exception as ex:
             print(f'Error set_custom {ex}')
             raise ex

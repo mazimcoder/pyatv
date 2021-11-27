@@ -42,7 +42,7 @@ class FacadeRemoteControl(Relayer, interface.RemoteControl):
         """Initialize a new FacadeRemoteControl instance."""
         super().__init__(interface.RemoteControl, DEFAULT_PRIORITIES)
 
-    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid:str) -> None:
+    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid:str) -> bool:
         """Custom cmd"""
         try:
             return await self.relay("set_custom")(keyboard=keyboard, action=action, fn=fn,devid=devid)

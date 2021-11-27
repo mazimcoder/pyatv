@@ -133,7 +133,7 @@ class DataStreamChannel(AbstractHAPChannel):
 
             pb_msg = protobuf.ProtocolMessage()
             pb_msg.ParseFromString(message)
-            print(f'=============================\n{pb_msg}\n=============================')
+            # print(f'========Mustafa==============\n{pb_msg}\n=============================')
             self.listener.handle_protobuf(pb_msg)
 
     def send_protobuf(self, message: protobuf.ProtocolMessage) -> None:

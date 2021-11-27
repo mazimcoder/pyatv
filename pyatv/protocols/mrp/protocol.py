@@ -140,7 +140,8 @@ class MrpProtocol(MessageDispatcher[int, protobuf.ProtocolMessage]):
 
             # Subscribe to updates at this stage
             await self.send_and_receive(messages.client_updates_config())
-            await self.send_and_receive(messages.get_keyboard_session())
+            # await self.send_and_receive(messages.get_keyboard_session())
+
         except Exception:
             # Something went wrong, let's do cleanup
             self.stop()

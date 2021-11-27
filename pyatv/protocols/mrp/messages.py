@@ -1,6 +1,8 @@
 """Helper code for dealing with protobuf messages."""
 
 import binascii
+import datetime
+import uuid
 from uuid import uuid4
 
 from pyatv import const
@@ -78,11 +80,11 @@ def crypto_pairing(pairing_data, is_pairing=False):
 
 
 def client_updates_config(
-    artwork=True,
-    now_playing=False,
-    volume=True,
-    keyboard=True,
-    output_device_updates=True,
+        artwork=True,
+        now_playing=False,
+        volume=True,
+        keyboard=True,
+        output_device_updates=True,
 ):
     """Create a new CLIENT_UPDATES_CONFIG_MESSAGE."""
     message = create(protobuf.CLIENT_UPDATES_CONFIG_MESSAGE)
@@ -119,18 +121,18 @@ def send_hid_event(use_page, usage, down):
 
     data = use_page.to_bytes(2, byteorder="big")
     data += usage.to_bytes(2, byteorder="big")
-    data += (1 if down else 0).to_bytes(2, byteorder="big")
+    data += (100 if down else 0).to_bytes(2, byteorder="big")
 
     # This is the format that the device expects. Some day I might take some
     # time to decode it for real, but this is fine for now.
     event.hidEventData = (
-        abstime
-        + binascii.unhexlify(
-            b"00000000000000000100000000000000020"
-            + b"00000200000000300000001000000000000"
-        )
-        + data
-        + binascii.unhexlify(b"0000000000000001000000")
+            abstime
+            + binascii.unhexlify(
+        b"00000000000000000100000000000000020"
+        + b"00000200000000300000001000000000000"
+    )
+            + data
+            + binascii.unhexlify(b"0000000000000001000000")
     )
 
     return message
@@ -152,6 +154,51 @@ def command_result(identifier, send_error=protobuf.SendError.NoError):
     inner = message.inner()
     inner.sendError = send_error
     inner.handlerReturnStatus = protobuf.HandlerReturnStatus.Success
+    return message
+
+
+def GetRemoteInput_text():
+    """process Remote text message Mustafa V1.1"""
+    # create(protobuf.ProtocolMessage.GET_KEYBOARD_SESSION_MESSAGE)
+    message = create(protobuf.ProtocolMessage.GET_REMOTE_TEXT_INPUT_SESSION_MESSAGE)
+
+    return message
+
+
+def RemoteInput_text(action, text):
+    """process Remote text message Mustafa V1.1"""
+    message = create(protobuf.ProtocolMessage.REMOTE_TEXT_INPUT_MESSAGE)
+    _m = message.inner()
+    _m.data = bytes(text, encoding="UTF-8")
+    _m.version = 3
+    t = datetime.datetime.utcnow()
+    ts = t.timestamp()
+    _m.timestamp = ts
+    # _m.actionType = action
+    return message
+
+
+def Input_text(action, text):
+    """process Input text message Mustafa V1.1"""
+    message = create(protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE)
+    _m = message.inner()
+    _m.text = text
+    t = datetime.datetime.utcnow()
+    ts = t.timestamp()
+    _m.timestamp = ts
+    _m.actionType = action
+    return message
+
+
+def keyboard_text(action, text):
+    """process keyboard text message Mustafa V1.1"""
+    message = create(protobuf.ProtocolMessage.TEXT_INPUT_MESSAGE)
+    _m = message.inner()
+    _m.text = text
+    t = datetime.datetime.utcnow()
+    ts = t.timestamp()
+    _m.timestamp = ts
+    _m.actionType = action
     return message
 
 

@@ -181,7 +181,10 @@ class InputAction(Enum):
     """Press and release twice quickly."""
 
     Hold = 2
-    """Press and hold for one second before releasing."""
+    """Press and hold."""
+
+    Release = 3
+    """Release."""
 
 
 class PairingRequirement(Enum):

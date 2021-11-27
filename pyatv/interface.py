@@ -248,7 +248,7 @@ class RemoteControl:
     """Base class for API used to control an Apple TV."""
 
     @feature(51, "set_custom", "Custom cmds")
-    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid:str) -> None:
+    async def set_custom(self, keyboard: str, action: InputAction, fn: int, devid:str) -> bool:
         """Custom cmd"""
         raise exceptions.NotSupportedError()
 

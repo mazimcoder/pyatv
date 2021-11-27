@@ -74,6 +74,9 @@ atvpairing = {
 atvMeta = {
     "": AppleTV
 }
+atvKeyboard = {
+    "": AppleTV
+}
 atvMetaKeepalive = {
     "": bool
 
@@ -190,8 +193,9 @@ def ReestablishConnection(id: str, devip: str, config, protocol: Protocol, servi
         while atvMeta.__contains__(id) is False and cnt < 50:
             time.sleep(3)
             cnt += 1
-            future = loop.create_task(coro=Connectatv(id=id, config=config, protocol=protocol, loop=old_loop),
-                                      name=f'ReestablishCon.Devi{id}')
+            future = loop.create_task(
+                coro=Connectatv(id=id, config=config, protocol=protocol, loop=old_loop, object='meta'),
+                name=f'ReestablishCon.Devi{id}')
             loop.run_until_complete(future)
             loop.close()
             print(f'Reconnecting devIP:{devip} devid:{id} attempt:{cnt}')
@@ -214,9 +218,9 @@ def ReestablishConnection(id: str, devip: str, config, protocol: Protocol, servi
         print(f'Error ReestablishConnectionSender {ex}')
 
 
-async def Connectatv(id, config, protocol, loop) -> AppleTV:
+async def Connectatv(id, config, protocol, loop, object: str) -> AppleTV:
     try:
-        # loop = asyncio.new_event_loop()
+        # loop = asyncio.get_event_loop()
         if loop is None:
             atv_ = atvMeta[id]
             await atv_.connect()
@@ -225,12 +229,16 @@ async def Connectatv(id, config, protocol, loop) -> AppleTV:
             # _atv.close()
             # await _atv.connect()
             if _atv is not None:
-                atvMeta.update({id: _atv})
+                if object.__eq__('meta'):
+                    atvMeta.update({id: _atv})
+                elif object.__eq__('keyboard'):
+                    atvKeyboard.update({id: _atv})
             return _atv
     except Exception as ex:
-        print(f'Error Connectatv: {ex}')
+        print(f'Error Connectatv: {str(ex)}')
         if atvMeta.__contains__(id):
             atvMeta.pop(id)
+        raise ex
 
 
 class DeviceListener(pyatv.interface.DeviceListener, pyatv.interface.PushListener):
@@ -492,7 +500,7 @@ async def Fncompremoteip(devip, hid: Optional[str], press: Optional[str], cnt, a
             producer = StateProducer()
             setupcompapi = pyatv.protocols.companion.CompanionAPI(config=config, loop=loop, service=_service,
                                                                   device_listener=producer)
-            atvCompanionSetup.update({iddev:setupcompapi})
+            atvCompanionSetup.update({iddev: setupcompapi})
             atvComapanionStateProducer.update({iddev: producer})
             try:
                 await setupcompapi.connect()
@@ -1102,10 +1110,15 @@ async def keyboard(request: web.Request):
         v = request.match_info['passw']
         passw = str(v)
         iddev = ""
-        char = request.rel_url.query.get('char')
-        char = char.strip('"')
+        data = request.rel_url.query.get('data')
+        if data.__eq__('" "'):
+            data = " "
+        else:
+            data = str(data).strip('"')
         _fn = request.rel_url.query.get('fn')
         fn = int(_fn, base=16)
+        if fn > 0xff:
+            return web.Response(text=f'Error fn value is bigger than 0xff', status=500)
         action: str = request.match_info['action']
         config: BaseConfig
         found = False
@@ -1183,18 +1196,33 @@ async def keyboard(request: web.Request):
         while cnt > 0:
             try:
                 atvlocal: AppleTV
-                if atvMeta.__contains__(iddev):
-                    atvlocal = atvMeta[iddev]
+                if atvKeyboard.__contains__(iddev):
+                    atvlocal = atvKeyboard[iddev]
                     try:
-                        # atvlocal.close()
-                        atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop)
+                        atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop,
+                                                    object='keyboard')
                     except Exception as ex:
                         if str(ex).lower().__contains__('already connected') is False:
-                            print(f'Error Keyboard connect {ex}')
+                            if atvKeyboard.__contains__(iddev) is False:
+                                print(f"Error reconnecting keyboard DevIP: {device_ip}, trying: {cnt}")
+                                atvKeyboard.pop(iddev)
+                                cnt -= 1
+                                continue
+
                 else:
-                    atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop)
-                    if atvMeta.__contains__(iddev) is False:
-                        return web.Response(text=f"Couldn't connect DevIP: {device_ip}")
+                    try:
+                        atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop,
+                                                    object='keyboard')
+                        if atvKeyboard.__contains__(iddev) is False:
+                            print(f"Couldn't connect keyboard DevIP: {device_ip}, trying: {cnt}")
+                            atvKeyboard.pop(iddev)
+                            cnt -= 1
+                            continue
+                    except Exception as ex:
+                        if str(ex).lower().__contains__('already connected') is False:
+                            print(f"Error reconnecting keyboard DevIP: {device_ip}, trying: {cnt}")
+                            cnt -= 1
+                            continue
 
                 _action: InputAction
                 if action.lower().__eq__('single'):
@@ -1203,26 +1231,30 @@ async def keyboard(request: web.Request):
                     _action = InputAction.DoubleTap
                 elif action.lower().__eq__('hold'):
                     _action = InputAction.Hold
+                elif action.lower().__eq__('release'):
+                    _action = InputAction.Release
                 else:
                     _action = InputAction.SingleTap
 
-                await atvlocal.remote_control.set_custom(keyboard=char, action=_action, fn=fn, devid=iddev)
+                complete = await atvlocal.remote_control.set_custom(keyboard=data, action=_action, fn=fn, devid=iddev)
                 # atvlocal.close()
                 if cnt == 0:
                     if atvConfigAir.__contains__(iddev):
                         atvConfigAir.pop(iddev)
-                    if atvMeta.__contains__(iddev):
-                        atvMeta.pop(iddev)
+                    if atvKeyboard.__contains__(iddev):
+                        atvKeyboard.pop(iddev)
 
-                return web.Response(text=f"Device:{device_ip} Keyboard char:{char} , action:{action}", status=200)
+                return web.Response(text=f"{'' if complete else 'Error'}    Device:{device_ip} Keyboard data:{data} , fn={fn},"
+                                         f" action:{action}",
+                                    status=200)
             except Exception as ex:
-                if ex.args.__eq__(str('STOPPED')):
-                    cnt -= 1
-                    if atvMeta.__contains__(iddev):
-                        atvMeta.pop(iddev)
+                if str(ex).__eq__('STOPPED'):
+                    if atvKeyboard.__contains__(iddev):
+                        atvKeyboard.pop(iddev)
+                cnt -= 1
 
         return web.Response(
-            text=f"Faild to connect at attempt:{5 - cnt}  Device:{device_ip} Keyboard char:{char} , action:{action}",
+            text=f"Error keyboard attempt:{5 - cnt}  Device:{device_ip} Keyboard data:{data} , fn={fn}, action:{action}",
             status=500)
     except Exception as ex:
         return web.Response(text=f'Error keyboard:{ex}', status=500)
@@ -1354,7 +1386,8 @@ async def meta(request: web.Request):
                 # atvlocal = _atvlocal.result()
                 # atvlocal = loop3.run_until_complete(future=_atvlocal)
                 # loop3.close()
-                atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop3)
+                atvlocal = await Connectatv(id=iddev, config=config, protocol=Protocol.AirPlay, loop=loop3,
+                                            object='meta')
                 if atvMeta.__contains__(iddev) is False:
                     return web.Response(text=f"Couldn't connect DevIP: {device_ip}")
 
