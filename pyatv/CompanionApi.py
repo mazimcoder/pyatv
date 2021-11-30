@@ -3,6 +3,7 @@ import asyncio
 import fnmatch
 import io
 import logging
+import shutil
 import stat
 import sys
 import threading
@@ -15,8 +16,8 @@ from aiohttp.typedefs import LooseHeaders
 
 import pyatv
 import time
-from pyatv import Protocol, FacadeAppleTV
-from pyatv.Listeners import atvComapanionStateProducer, atvCompanionSetup
+from pyatv import Protocol, FacadeAppleTV, Listeners
+from pyatv.Listeners import atvComapanionStateProducer, atvCompanionSetup, atv_full_directory_remotes_config
 from pyatv.const import InputAction, PairingRequirement, DeviceState, MediaType, ShuffleState, RepeatState
 from pyatv.core import protocol
 from pyatv.interface import BaseService, AppleTV, BaseConfig, Playing, ArtworkInfo
@@ -34,7 +35,7 @@ import os
 import json
 from pyatv.support.state_producer import StateProducer, StateListener
 
-ver = 1.0
+version = 1.1
 __author__ = 'Mustafa Abdel Azim'
 
 PAGE = """
@@ -65,6 +66,7 @@ socket.onerror = function(error) {
 <div id="status">Connecting...</div>
 <div id="state"></div>
 """
+
 RouterPort = 11500
 routes = web.RouteTableDef()
 
@@ -354,7 +356,7 @@ def add_credentials(config, query):
 
 @routes.get("/test")
 async def test(request):
-    return web.Response(text=f"Server is running!", status=200)
+    return web.Response(text=f"ComanionAPI V{version} is running!", status=200)
 
 
 @routes.get("/state/{id}")
@@ -1244,9 +1246,10 @@ async def keyboard(request: web.Request):
                     if atvKeyboard.__contains__(iddev):
                         atvKeyboard.pop(iddev)
 
-                return web.Response(text=f"{'' if complete else 'Error'}    Device:{device_ip} Keyboard data:{data} , fn={fn},"
-                                         f" action:{action}",
-                                    status=200)
+                return web.Response(
+                    text=f"{'' if complete else 'Error'}    Device:{device_ip} Keyboard data:{data} , fn={fn},"
+                         f" action:{action}",
+                    status=200)
             except Exception as ex:
                 if str(ex).__eq__('STOPPED'):
                     if atvKeyboard.__contains__(iddev):
@@ -1544,6 +1547,84 @@ async def websocket_handler(request, pyatv):
         return web.Response(text=f'Error websocket_handler:{ex}')
 
 
+@routes.get('/readjsonfile')
+async def readjsonfile(request: web.Request):
+    try:
+        settingsfile = "ATVsettings.json"
+        os.chdir(Listeners.atv_full_directory_remotes_config)
+        fulldirectory = os.getcwd()
+        if fulldirectory == Listeners.atv_full_directory_remotes_config:
+            try:
+                with open(file=settingsfile, mode='r+', closefd=True) as file:
+                    jfile = json.load(fp=file)
+                    file.close()
+                return web.json_response(jfile)
+            except Exception as ex:
+                file.close()
+        else:
+            print(f'Error readjsonfile path unreadable!')
+            return web.Response(text=f'Error readjsonfile path unreadable!',status=500)
+    except Exception as ex:
+        print(f'Error readjsonfile {ex}')
+        return web.Response(text=f'Error readjsonfile {ex}', status=500)
+
+
+@routes.post('/updatejsonfile')
+async def updatejsonfile(request: web.Request):
+    try:
+        if request.can_read_body:
+            jfile = await request.json()
+            print(f'==============> Received json update request!<==============\n{jfile}\n'
+                  f'==============> end <==============')
+            di = jfile['Credentials']
+            di1 = jfile['Service']
+            di2 = jfile['PairCredentials']
+            di3 = jfile['Servers']
+            for dd in di:
+                atvCredentialsFile.update(dd)
+            for dd1 in di1:
+                ServicePortFile.update(dd1)
+            for dd2 in di2:
+                atvPairCredentialsFile.update(dd2)
+            for dd3 in di3:
+                ServersFile.update(dd3)
+            atvremotes_config(True)
+            print(f'==============> Json updated! <==============')
+            return web.Response(text='Json updated!', status=200)
+
+        else:
+            print(f'Update json file request has no body, json\'sn\'t updated!')
+            return web.Response(text='Update json file request has no body, json\'sn\'t updated!', status=500)
+
+    except Exception as ex:
+        print(f'Error updatejsonfile {ex}')
+        return web.Response(text=f'Error updatejsonfile {ex}', status=500)
+
+
+def load_save_atvremotes_config(loadfilepath: str, saveonly: bool = False) -> bool:
+    try:
+        directory_split = str(loadfilepath).split('/')
+        totallen = len(directory_split)
+        _directory = ""
+        cnt = 0
+        for di in directory_split:
+            d = str(f'//{di}')
+            _directory = f'{_directory}{d}'
+            cnt += 1
+            if totallen - 1 == cnt:
+                break
+
+        if saveonly is False:
+            shutil.copyfile(_directory, atv_full_directory_remotes_config)
+        else:
+            shutil.copyfile(atv_full_directory_remotes_config, _directory)
+
+        return True
+    except Exception as ex:
+        print(f'Error load_save_atvremotes_config {ex}')
+        return False
+
+
 def atvremotes_config(updateJsononly: bool) -> None:
     # updateonly if true then data will be saved to json without creating new file if it's corrupt
     try:
@@ -1566,6 +1647,7 @@ def atvremotes_config(updateJsononly: bool) -> None:
         os.makedirs(folder, exist_ok=True)
         os.chdir(directoryfolder)
         fulldirectory = os.getcwd()
+        Listeners.atv_full_directory_remotes_config = fulldirectory
         print(f"The configuration directory for ATV remotes credentials:{fulldirectory}\n")
         openerror = ""
         createnewfile = False
@@ -1600,6 +1682,7 @@ def atvremotes_config(updateJsononly: bool) -> None:
                     print(f"Stored Devices and Servers:{len(ServersFile) - 2}")
                     for ser in ServersFile:
                         print(f"{ser} >>> {ServersFile[ser]}")
+                    file.close()
                     return
             except Exception as ex:
                 print(print(f"Error:atvremotes_config:open1: {ex}"))
@@ -1625,6 +1708,7 @@ def atvremotes_config(updateJsononly: bool) -> None:
                 with open(mode='w+', file=settingsfile, errors=openerror, closefd=True) as file:
                     json.dump(obj=dfile, fp=file, sort_keys=True, indent=1)
                     print(f"ATVsettings.json Updated:{file}")
+                    file.close()
                     return
             except Exception as ex:
                 print(print(f"Error:atvremotes_config:Updateonly: {ex}"))
@@ -1648,6 +1732,7 @@ def atvremotes_config(updateJsononly: bool) -> None:
                 with open(mode='w+', file=settingsfile, errors=openerror, closefd=True) as file:
                     json.dump(obj=dfile, fp=file, sort_keys=True, indent=1)
                     print(f"ATVsettings.json isn't found Created new empty file with default service port{RouterPort}")
+                    file.close()
             except Exception as ex:
                 print(print(f"Error:atvremotes_config:open2: {ex}"))
 
@@ -1681,6 +1766,7 @@ def main():
     app["clients"] = {}
     app.add_routes(routes)
     app.on_shutdown.append(on_shutdown)
+    print(f'============>>> CompanionApi {version} <<<=================')
     web.run_app(app, port=RouterPort)
 
 

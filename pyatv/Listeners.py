@@ -12,3 +12,5 @@ atvCompanionSetup = {   #id:CompanionAPI
 
 
 }
+
+atv_full_directory_remotes_config = ''

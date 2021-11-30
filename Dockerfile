@@ -9,7 +9,7 @@ EXPOSE 1000-60000/udp
 ENTRYPOINT [ "/bin/bash", "-l", "-c" ]
 
 WORKDIR /app
-ADD ./pyatv /app/
+ADD . /app/
 RUN apt-get -y update && \
     apt-get -y upgrade && \
 #    apt-get -y install build-essential && \
@@ -19,9 +19,11 @@ RUN apt-get -y update && \
     python3 -m pip install zeroconf yarl wheel virtualenv urllib3 uritemplate typing-extensions tox toml srptools soupsieve six setuptools rsa requests pytest pytest-xdist pytest-runner pytest-forked pyparsing pycparser pyasn1 pyasn1-modules py protobuf pluggy platformdirs pip Pillow Pi packaging ordered-set netifaces mutagen multidict mediafile macholib iniconfig ifaddr idna httplib2 googleapis-common-protos google google-auth google-auth-httplib2 google-api-python-client google-api-core filelock execnet distlib deepdiff cryptography charset-normalizer cffi certifi cachetools bitarray beautifulsoup4 backports.entry-points-selectable attrs async-timeout altgraph aiohttp pillow miniaudio &&\
     python3 -m pip install https://github.com/pyinstaller/pyinstaller/archive/develop.tar.gz
 
-RUN pyinstaller CompanionApi.py
+WORKDIR /app
 
-ADD ./pyatv/ATVremotes/ATVsettings.json /app/dist/CompanionApi/ATVremotes/
+RUN pyinstaller ./pyatv/CompanionApi.py
+
+ADD ./pyatv/ATVremotes/ATVsettings.json /app/pyatv/dist/CompanionApi/ATVremotes/
 
 WORKDIR /
 RUN mkdir "app0"
@@ -29,7 +31,7 @@ WORKDIR /app
 RUN cp -rp ./dist/CompanionApi /app0/
 
 WORKDIR /
-RUN rm -rf /app/
+#RUN rm -rf /app/
 
 WORKDIR /app0/CompanionApi
 CMD ["./CompanionApi"]
