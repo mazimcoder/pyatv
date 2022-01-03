@@ -97,6 +97,7 @@ artwork.png
 .pytest_cache
 .mypy_cache
 coverage.xml
-
+#	Ignoring Tar files for Docker Mustafa
+*.tar
 # Temporary stuff can be placed here (logs, credentials, etc.)
 work/

@@ -31,7 +31,7 @@ WORKDIR /app
 RUN cp -rp ./dist/CompanionApi /app0/
 
 WORKDIR /
-#RUN rm -rf /app/
+RUN rm -rf /app/
 
 WORKDIR /app0/CompanionApi
 CMD ["./CompanionApi"]
