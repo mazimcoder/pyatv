@@ -35,7 +35,7 @@ import os
 import json
 from pyatv.support.state_producer import StateProducer, StateListener
 
-version = 1.1
+version = 1.2
 __author__ = 'Mustafa Abdel Azim'
 
 PAGE = """
