@@ -1,6 +1,8 @@
 
 
-FROM amd64/ubuntu
+#FROM amd64/ubuntu
+#FROM arm32v7/ubuntu
+#FROM arm64v8/ubuntu
 #FROM arm32v7/ubuntu
 MAINTAINER "Mustafa A. Azim"
 #VOLUME ["app"]
