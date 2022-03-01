@@ -1,9 +1,14 @@
 
 
 #FROM amd64/ubuntu
+<<<<<<< HEAD
 #FROM arm32v7/ubuntu
 #FROM arm64v8/ubuntu
+=======
+>>>>>>> 19a9972 (Editing Docker)
 #FROM arm32v7/ubuntu
+#FROM arm64v8/ubuntu
+FROM arm32v7/ubuntu
 MAINTAINER "Mustafa A. Azim"
 #VOLUME ["app"]
 EXPOSE 1000-60000/tcp
